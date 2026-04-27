@@ -98,9 +98,12 @@ static ir_opcode_t binop_opcode(OperatorType_t op, int is_unsigned)
     switch (op) {
     case OP_PLUS:                 return IR_OP_ADD;
     case OP_MINUS:                return IR_OP_SUB;
-    case OP_MULTIPLY:             return IR_OP_MUL;
-    case OP_DIVIDE:               return is_unsigned ? IR_OP_DIVU : IR_OP_DIVS;
-    case OP_MODULE:               return is_unsigned ? IR_OP_MODU : IR_OP_MODS;
+
+    case OP_MULTIPLY:             
+    case OP_DIVIDE:               
+    case OP_MODULE: 
+        return IR_OP_INVALID;              
+        
     case OP_BITWISE_AND:          return IR_OP_AND;
     case OP_BITWISE_OR:           return IR_OP_OR;
     case OP_BITWISE_XOR:          return IR_OP_XOR;
@@ -221,6 +224,7 @@ ir_value_t ir_lower_lvalue_addr(ir_lower_ctx_t *lctx,
         if (out_pointee_type) *out_pointee_type = inner_type;
         return ptr;
     }
+
     case NODE_ARRAY_ACCESS: {
         /* lower base expression (get base pointer or array address)
          *     lower index expression
@@ -343,6 +347,7 @@ ir_value_t ir_lower_lvalue_addr(ir_lower_ctx_t *lctx,
     }
 }
 
+
 /************************************************************
  * Main expression lowering  (§8.2)
  ************************************************************ */
@@ -461,6 +466,12 @@ ir_value_t ir_lower_expr(ir_lower_ctx_t *lctx,
             default: break;
             }
 
+            if(base == OP_MULTIPLY || base == OP_DIVIDE || base == OP_MODULE){
+                ir_diag(lctx, "IR001", expr->lineNumber,
+                    "assignment operator not supported by target ISA");
+                return ir_val_none();
+            }
+
             unsigned r = ir_new_vreg(lctx->func);
             ir_instr_t *i = ir_instr_new(binop_opcode(base, is_unsigned));
             i->dst    = ir_val_vreg(r, lhs_type);
@@ -544,6 +555,13 @@ ir_value_t ir_lower_expr(ir_lower_ctx_t *lctx,
         rv = maybe_widen(lctx, rv, is_unsigned);
 
         ir_opcode_t ir_op = binop_opcode(op, is_unsigned);
+
+        if(ir_op == IR_OP_INVALID){
+            ir_diag(lctx, "IR001", expr->lineNumber,
+                "operator not supported by target ISA");
+            return ir_val_none();
+        }
+
         ir_type_t dst_type = expr_type;
         if (ir_op == IR_OP_EQ || ir_op == IR_OP_NEQ ||
             ir_op == IR_OP_LTS || ir_op == IR_OP_LES ||
@@ -648,6 +666,7 @@ ir_value_t ir_lower_expr(ir_lower_ctx_t *lctx,
         *out_type = expr_type;
         return emit_load(lctx, res_addr, expr_type);
     }
+
 
     /* ── G3: NODE_FUNCTION_CALL ──────────────────────────────────────
      *
