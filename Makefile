@@ -1,13 +1,16 @@
 CC      = gcc
 CFLAGS  = -Wall -Wextra -g 
 
-LEXER_DIR  = Lexer
-PARSER_DIR = Parser
-UTILS_DIR  = Util
-SEM_DIR    = Semantic
-IR_DIR     = IR
+LEXER_DIR    = Lexer
+PARSER_DIR   = Parser
+UTILS_DIR    = Util
+SEM_DIR      = Semantic
+IR_DIR       = IR
+REGALLOC_DIR = RegAlloc
 
-SRCS    = $(PARSER_DIR)/parser.tab.c \
+# Integrated source list
+SRCS    = main.c \
+          $(PARSER_DIR)/parser.tab.c \
           $(LEXER_DIR)/lex.yy.c      \
           $(PARSER_DIR)/ASTree.c     \
           $(PARSER_DIR)/ASTPrint.c   \
@@ -24,22 +27,33 @@ SRCS    = $(PARSER_DIR)/parser.tab.c \
           $(IR_DIR)/ir_lower.c       \
           $(IR_DIR)/ir_lower_decl.c  \
           $(IR_DIR)/ir_lower_expr.c  \
-          $(IR_DIR)/ir_lower_stmt.c
+          $(IR_DIR)/ir_lower_stmt.c  \
+          $(REGALLOC_DIR)/liveness.c \
+          $(REGALLOC_DIR)/interference.c \
+          $(REGALLOC_DIR)/precolor.c \
+          $(REGALLOC_DIR)/regalloc.c \
+          $(REGALLOC_DIR)/spill.c
 
 TARGET  = compiler
 
 all: $(TARGET)
 
-# Generate parser (bison output stays in parser/)
+# Build Bison
 $(PARSER_DIR)/parser.tab.c $(PARSER_DIR)/parser.tab.h: $(PARSER_DIR)/parser.y
 	bison -d $(PARSER_DIR)/parser.y -o $(PARSER_DIR)/parser.tab.c
 
-# Generate lexer (flex output stays in lexer/, needs parser.tab.h for token defs)
+# Build Flex
 $(LEXER_DIR)/lex.yy.c: $(LEXER_DIR)/lexer.l $(PARSER_DIR)/parser.tab.h
 	flex -o $(LEXER_DIR)/lex.yy.c $(LEXER_DIR)/lexer.l
 
+# Build main executable
 $(TARGET): $(SRCS)
 	$(CC) $(CFLAGS) -o $@ $^
+
+# Utility to run a test file easily
+# Example: make run-linear
+run-%: $(TARGET)
+	./$(TARGET) $*.c
 
 clean:
 	rm -f $(PARSER_DIR)/parser.tab.c \
