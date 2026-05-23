@@ -19,6 +19,7 @@
 #define K_FULL    11   /* r1–r11: all allocatable (r12/fp reserved)   */
 #define K_CALLEE   4   /* r8–r11: callee-saved only (call-live nodes) */
 
+/* Returns the colour-budget K for v: K_CALLEE if call-live, otherwise K_FULL. */
 static int k_of(const precolor_t *pc, unsigned v)
 {
     return precolor_is_call_live(pc, v) ? K_CALLEE : K_FULL;
@@ -26,6 +27,7 @@ static int k_of(const precolor_t *pc, unsigned v)
 
 /* ─── alias helpers ──────────────────────────────────────────────────────── */
 
+/* Follows the alias chain to the representative node for v. */
 static unsigned get_alias(const unsigned *alias, unsigned n, unsigned v)
 {
     /* Iterative path traversal — no mutation to keep the map simple. */
@@ -36,6 +38,7 @@ static unsigned get_alias(const unsigned *alias, unsigned n, unsigned v)
 
 /* ─── physical register names ────────────────────────────────────────────── */
 
+/* Returns a printable register name for a phys_reg_t (or SPILL/?). */
 static const char *reg_name(phys_reg_t c)
 {
     static const char *names[] = {
@@ -49,6 +52,7 @@ static const char *reg_name(phys_reg_t c)
 
 /* ─── main allocator ─────────────────────────────────────────────────────── */
 
+/* Runs the Chaitin-Briggs allocator (coalesce, simplify, select, alias) and returns the colouring. */
 regalloc_t *regalloc_build(const ir_function_t *func,
                             const ifg_t         *g,
                             const precolor_t    *pc)
@@ -259,12 +263,21 @@ regalloc_t *regalloc_build(const ir_function_t *func,
         }
 
         /* Preference order (r12/fp is reserved — never allocated):
-         *   non-call-live: r4–r7 (free temporaries) → r8–r11 (callee-saved)
+         *   non-call-live: r4–r6 (free temporaries) → r8–r11 (callee-saved)
          *                  → r1–r3 (ABI arg regs, last resort)
          *   call-live:     r8–r11 only (must survive calls)
+         *
+         * r7 (t3) is reserved exclusively for the codegen as a scratch when
+         * it needs to materialise an immediate / global into a register that
+         * is guaranteed not to clobber a live vreg.  Without per-instruction
+         * liveness in codegen, picking a scratch from the allocatable set
+         * produced silent miscompilations: e.g. `*p = a & 0xFF` would write
+         * the masked value to address 0xFF instead of *p when t1 happened to
+         * hold &p.  Reserving one register out of regalloc's reach makes the
+         * codegen scratch correctness-preserving by construction.
          */
         static const phys_reg_t pref_normal[] = {
-            PHYS_R4, PHYS_R5, PHYS_R6, PHYS_R7,
+            PHYS_R4, PHYS_R5, PHYS_R6,
             PHYS_R8, PHYS_R9, PHYS_R10, PHYS_R11,
             PHYS_R1, PHYS_R2, PHYS_R3
         };
@@ -313,6 +326,7 @@ regalloc_t *regalloc_build(const ir_function_t *func,
 
 /* ─── cleanup ────────────────────────────────────────────────────────────── */
 
+/* Releases the regalloc result and its colour array. */
 void regalloc_free(regalloc_t *r)
 {
     if (!r) return;
@@ -322,6 +336,7 @@ void regalloc_free(regalloc_t *r)
 
 /* ─── debug printer ──────────────────────────────────────────────────────── */
 
+/* Prints each vreg's assigned colour and any spills for debugging. */
 void regalloc_print(FILE *out, const char *func_name,
                     const regalloc_t *r, const precolor_t *pc)
 {

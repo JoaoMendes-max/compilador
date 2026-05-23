@@ -56,9 +56,11 @@ typedef struct {
     int      has_continue;    /* 0 for switch              */
 } ir_ctrl_frame_t;
 
-typedef struct ir_lower_ctx_s { 
+typedef struct ir_lower_ctx_s {
     ir_module_t        *module;     // The IR module being built
     semantic_context_t *sem_ctx;    // Live semantic context for type info, diagnostics, etc.
+    const TreeNode_t   *root;       // AST root — used to look up struct/union decls by tag
+                                    // when the type's decl_node back-pointer is NULL.
 
     /* current function being lowered */
     ir_function_t      *func;       // The current function being lowered (NULL if not inside a function)
@@ -90,6 +92,25 @@ void ir_warn(ir_lower_ctx_t *lctx, const char *code,
 ir_type_t ir_type_from_sem(const type_t *sem_type);
 
 /* ────────────────────────────────────────────────────────────
+ * Aggregate helpers — shared by ir_lower_decl.c and ir_lower_expr.c.
+ * ──────────────────────────────────────────────────────────── */
+
+/* Walk the AST rooted at `node` (depth-first, siblings then children) for a
+ * NODE_STRUCT_DECLARATION / NODE_UNION_DECLARATION whose tag matches `tag`.
+ * Used as a fallback when the semantic type's `aggregate.decl_node`
+ * back-pointer is NULL (tags resolved indirectly via the symbol table). */
+const TreeNode_t *ir_find_aggregate_decl(const TreeNode_t *node,
+                                          NodeType_t want_kind,
+                                          const char *tag);
+
+/* Storage size in 16-bit words for a SEMANTIC type, walking aggregate
+ * declarations through the AST when the IR type system has dropped layout
+ * info (TYPE_STRUCT_TAG / TYPE_UNION_TAG).  Used by `ir_lower_global_decl`
+ * to size globals and by `ir_lower_local_decl` to bump `next_slot_id` for
+ * aggregate locals. */
+size_t ir_compute_sem_type_words(ir_lower_ctx_t *lctx, const type_t *t);
+
+/* ────────────────────────────────────────────────────────────
  * Section 1 – Declarations  (ir_lower_decl.c)
  * ──────────────────────────────────────────────────────────── */
 
@@ -98,7 +119,9 @@ ir_type_t ir_type_from_sem(const type_t *sem_type);
  * Called for top-level NODE_VAR_DECLARATION / NODE_ARRAY_DECLARATION
  * with MEMORY_CLASS_GLOBAL.
  */
-void ir_lower_global_decl(ir_lower_ctx_t *lctx, const TreeNode_t *decl_node);
+void ir_lower_global_decl(ir_lower_ctx_t *lctx, 
+                          const TreeNode_t *decl_node,
+                          const TreeNode_t *init_expr);
 
 /*
  * Emit a stack slot for a local variable inside a function.

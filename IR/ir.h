@@ -85,6 +85,12 @@ typedef enum {
     /* §7.2 Arithmetic */
     IR_OP_ADD,
     IR_OP_SUB,
+    /* MUL / DIVS / DIVU / MODS / MODU below are lowered as IR_OP_CALL to
+     * runtime helpers (__mul, __divs, __divu, __mods, __modu) by
+     * ir_lower_expr.c::needs_runtime_call() / emit_arith_call().  They never
+     * reach the codegen switch on this target; kept in the enum so the IR
+     * text serialiser can name them and so a future hardware-mul backend
+     * can emit them directly without changing the IR opcode set. */
     IR_OP_MUL,
     IR_OP_DIVS,         /* signed divide                 */
     IR_OP_DIVU,         /* unsigned divide               */
@@ -157,10 +163,36 @@ struct ir_instr_s { // quadruple representation: op dst src1 src2
     ir_value_t   dst;        /* Destination virtual register: IR_VAL_NONE for stores/void calls/ret */
     ir_value_t   src[2];     /* up to two operands for most instructions */
 
+    /* ── Per-opcode auxiliary data ──────────────────────────────────────
+     *
+     * `as` is a UNION — every member shares the same storage.  Touching
+     * the wrong member for the current `op` will silently corrupt another
+     * member.  Specifically:
+     *
+     *     as.gep.width          (long, 4 or 8 bytes at offset 0)
+     *         aliases
+     *     as.call.callee[0..7]  (the first bytes of the callee string)
+     *
+     *     as.branch.true_block  (unsigned at offset 0)
+     *         aliases
+     *     as.sw.default_block   (unsigned at offset 0)
+     *         aliases
+     *     as.gep.width          (low half on a 64-bit long)
+     *
+     * Concrete bug this caused: writing the field name into
+     * `as.call.callee` for an IR_OP_GEP instruction set `as.gep.width` to
+     * the ASCII code of the field's first letter — `width = 'x' = 120`.
+     * Member-access lowering now writes the offset into `src[1]` and
+     * leaves `as.gep.width = 1` intact.
+     *
+     * Use the IR_*( ) accessors below in new code; they assert that the
+     * opcode matches the union member you're touching.  Direct field
+     * accesses are still legal but skip the runtime guard.
+     */
     union {
         struct {
             /* For GEP (Get Element Pointer): width */
-            long width;    /* <=> sizeof(array_data_type) (compile time element size)*/
+            long width;    /* element size in 16-bit words */
         } gep;
         struct {
             char       callee[128];
@@ -182,6 +214,71 @@ struct ir_instr_s { // quadruple representation: op dst src1 src2
 
     ir_instr_t *next;
 };
+
+/* Opcode-checked accessors.  The asserts compile out under -DNDEBUG.
+ * Prefer these to bare `ins->as.X.Y` — they make union punning bugs
+ * impossible to introduce silently.
+ *
+ * The READ macros expand to a rvalue expression — usable on the right of
+ * an assignment, in conditions, as a function arg, etc.  The SET macros
+ * expand to a statement (do/while wrapped) — usable as a standalone
+ * statement, NOT inside an expression.  Bare lvalue access is still
+ * supported via `ins->as.X.Y` for code that genuinely needs an address
+ * (e.g. `&ins->as.call.args[k]`). */
+#include <assert.h>
+
+/* Reads (rvalue) */
+#define IR_GEP_WIDTH(ins) \
+    (assert((ins)->op == IR_OP_GEP), (ins)->as.gep.width)
+
+#define IR_CALL_CALLEE(ins) \
+    (assert((ins)->op == IR_OP_CALL), (ins)->as.call.callee)
+
+#define IR_CALL_ARG_COUNT(ins) \
+    (assert((ins)->op == IR_OP_CALL), (ins)->as.call.arg_count)
+
+#define IR_CALL_IS_VOID(ins) \
+    (assert((ins)->op == IR_OP_CALL), (ins)->as.call.is_void_call)
+
+#define IR_BRANCH_TRUE(ins) \
+    (assert((ins)->op == IR_OP_BRANCH || (ins)->op == IR_OP_GOTO), \
+     (ins)->as.branch.true_block)
+
+#define IR_BRANCH_FALSE(ins) \
+    (assert((ins)->op == IR_OP_BRANCH || (ins)->op == IR_OP_GOTO), \
+     (ins)->as.branch.false_block)
+
+#define IR_SWITCH_DEFAULT(ins) \
+    (assert((ins)->op == IR_OP_SWITCH), (ins)->as.sw.default_block)
+
+#define IR_SWITCH_CASE_COUNT(ins) \
+    (assert((ins)->op == IR_OP_SWITCH), (ins)->as.sw.case_count)
+
+/* Writes (statement form) */
+#define IR_GEP_WIDTH_SET(ins, v) \
+    do { assert((ins)->op == IR_OP_GEP); (ins)->as.gep.width = (v); } while (0)
+
+#define IR_CALL_SET_CALLEE(ins, name) \
+    do { assert((ins)->op == IR_OP_CALL); \
+         snprintf((ins)->as.call.callee, sizeof((ins)->as.call.callee), \
+                  "%s", (name)); } while (0)
+
+#define IR_CALL_SET_ARG_COUNT(ins, n) \
+    do { assert((ins)->op == IR_OP_CALL); \
+         (ins)->as.call.arg_count = (n); } while (0)
+
+#define IR_CALL_SET_IS_VOID(ins, v) \
+    do { assert((ins)->op == IR_OP_CALL); \
+         (ins)->as.call.is_void_call = (v); } while (0)
+
+#define IR_CALL_SET_ARG(ins, k, val) \
+    do { assert((ins)->op == IR_OP_CALL); \
+         (ins)->as.call.args[(k)] = (val); } while (0)
+
+#define IR_BRANCH_SET_TARGETS(ins, t, f) \
+    do { assert((ins)->op == IR_OP_BRANCH || (ins)->op == IR_OP_GOTO); \
+         (ins)->as.branch.true_block = (t); \
+         (ins)->as.branch.false_block = (f); } while (0)
 
 /* ────────────────────────────────────────────────────────────
  * §6.3  Basic block (bb) - any structure without an indirection
@@ -252,11 +349,34 @@ typedef struct {
 
 typedef struct ir_global_s ir_global_t;
 
+/* What kind of initialiser a global carries (if any). */
+typedef enum {
+    IR_GINIT_NONE = 0,    /* uninitialised — emit zeros */
+    IR_GINIT_INT,         /* scalar integer constant in init_int */
+    IR_GINIT_STRING,      /* raw byte content (NUL-terminated) in init_string */
+    IR_GINIT_LABEL        /* address of another global symbol in init_label */
+} ir_global_init_kind_t;
+
+#define IR_GLOBAL_STR_MAX 256
+#define IR_GLOBAL_LBL_MAX 128
+
 struct ir_global_s {
-    char         name[128];
-    ir_type_t    type;
-    int          is_extern;
-    ir_global_t *next;
+    char                  name[128];
+    ir_type_t             type;
+    int                   is_extern;
+
+    /* Storage size in 16-bit words.  Codegen uses this to emit the right
+     * number of .word entries.  Set by lowering — defaults to
+     * ir_type_size_words(type) but is overridden for structs/unions whose
+     * IR type doesn't carry layout info. */
+    size_t                size_words;
+
+    ir_global_init_kind_t init_kind;
+    long                  init_int;                          /* IR_GINIT_INT    */
+    char                  init_string[IR_GLOBAL_STR_MAX];    /* IR_GINIT_STRING */
+    char                  init_label[IR_GLOBAL_LBL_MAX];     /* IR_GINIT_LABEL  */
+
+    ir_global_t          *next;
 };
 
 typedef struct ir_function_list_s ir_function_list_t;
@@ -282,7 +402,11 @@ void            ir_module_free(ir_module_t *mod);
 ir_function_t  *ir_function_new(const char *name, ir_type_t ret_type);
 void            ir_function_free(ir_function_t *func);
 void            ir_module_add_function(ir_module_t *mod, ir_function_t *func);
-void            ir_module_add_global(ir_module_t *mod, const char *name,
+/* Add a new global to the module.  The returned pointer is owned by the
+ * module; the caller may directly populate the init_kind and the matching
+ * init payload field (init_int / init_string / init_label).  Returns NULL
+ * on allocation failure or if mod/name is NULL. */
+ir_global_t    *ir_module_add_global(ir_module_t *mod, const char *name,
                                      ir_type_t type, int is_extern);
 
 /* ────────────────────────────────────────────────────────────
@@ -342,5 +466,9 @@ ir_type_t ir_type_union(const char *tag);
 /* Return the "native" scalar for a given IR type width */
 int ir_type_is_integer(ir_type_t t);
 int ir_type_equal(ir_type_t a, ir_type_t b);
+
+/* Storage size of a type in 16-bit words (the addressing unit of this
+ * ISA).  Arrays compose recursively; aggregates default to 1 word. */
+size_t ir_type_size_words(ir_type_t t);
 
 #endif /* IR_IR_H */

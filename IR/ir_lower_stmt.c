@@ -20,9 +20,6 @@
 
 #include "../Parser/ASTree.h"
 #include "../Semantic/semantic.h"
-#include "../Semantic/symbol.h"
-#include "../Semantic/type.h"
-#include "../Util/NodeTypes.h"
 #include "ir.h"
 #include "ir_lower.h"
 
@@ -105,6 +102,8 @@ static void prune_empty_tail_block(ir_lower_ctx_t *lctx)
     free(tail);
 }
 
+/* Walks the switch body's siblings and builds a linked list of case/default
+ * descriptors, allocating a fresh block for each clause. */
 static switch_case_t *collect_cases(const TreeNode_t *switch_body, ir_lower_ctx_t *lctx)
 {
     switch_case_t *head = NULL, *tail = NULL;
@@ -141,6 +140,7 @@ static switch_case_t *collect_cases(const TreeNode_t *switch_body, ir_lower_ctx_
 /* Forward declaration for mutual recursion */
 static void ir_lower_single_stmt(ir_lower_ctx_t *lctx, const TreeNode_t *s);
 
+/* Lowers a statement sibling chain, stopping early on the first error. */
 void ir_lower_stmt(ir_lower_ctx_t *lctx, const TreeNode_t *stmt)
 {
     if (!stmt) return;
@@ -152,6 +152,8 @@ void ir_lower_stmt(ir_lower_ctx_t *lctx, const TreeNode_t *stmt)
     }
 }
 
+/* Dispatches a single statement node to the appropriate lowering rule
+ * (blocks, control flow, declarations, returns, expression-statements). */
 static void ir_lower_single_stmt(ir_lower_ctx_t *lctx, const TreeNode_t *s)
 {
     if (!s) return;
@@ -502,8 +504,23 @@ static void ir_lower_single_stmt(ir_lower_ctx_t *lctx, const TreeNode_t *s)
          * init ; cond ; update ; body
          * This extraction keeps the lowering logic explicit and robust.
          */
+        /*
+         * A multi-declarator init like `for (int *p, *q; ...)` arrives as
+         * a sibling chain of declaration nodes that all belong to the init
+         * slot, so cond/update/body live past the run of declarations.
+         */
         const TreeNode_t *init_node = s->p_firstChild;
-        const TreeNode_t *cond_node = init_node ? init_node->p_sibling : NULL;
+        const TreeNode_t *init_end = init_node;
+        if (init_node &&
+            (init_node->nodeType == NODE_VAR_DECLARATION ||
+             init_node->nodeType == NODE_ARRAY_DECLARATION)) {
+            while (init_end->p_sibling &&
+                   (init_end->p_sibling->nodeType == NODE_VAR_DECLARATION ||
+                    init_end->p_sibling->nodeType == NODE_ARRAY_DECLARATION)) {
+                init_end = init_end->p_sibling;
+            }
+        }
+        const TreeNode_t *cond_node = init_end ? init_end->p_sibling : NULL;
         const TreeNode_t *update_node = cond_node ? cond_node->p_sibling : NULL;
         const TreeNode_t *body_node = update_node ? update_node->p_sibling : NULL;
         ir_type_t cond_type;
@@ -520,7 +537,7 @@ static void ir_lower_single_stmt(ir_lower_ctx_t *lctx, const TreeNode_t *s)
         }
 
         /*
-         * Lower the initializer in the current preheader block before
+         * Lower the initializer(s) in the current preheader block before
          * entering loop control flow.
          * If init is a declaration (e.g., for (int i = 0; ...)), create its
          * local slot here; otherwise lower it as a normal expression.
@@ -528,7 +545,10 @@ static void ir_lower_single_stmt(ir_lower_ctx_t *lctx, const TreeNode_t *s)
         if (init_node->nodeType != NODE_NULL) {
             if (init_node->nodeType == NODE_VAR_DECLARATION ||
                 init_node->nodeType == NODE_ARRAY_DECLARATION) {
-                ir_lower_local_decl(lctx, init_node);
+                for (const TreeNode_t *d = init_node; d != cond_node;
+                     d = d->p_sibling) {
+                    ir_lower_local_decl(lctx, d);
+                }
             } else {
                 ir_type_t t;
                 (void)ir_lower_expr(lctx, init_node, &t);

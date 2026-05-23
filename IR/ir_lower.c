@@ -2,10 +2,10 @@
  * ir_lower.c — Section 4: Structure / top-level lowering glue
  *
  * Responsibilities (§8.1, §8.4, §6):
- *   • Walk the NODE_TRANSLATION_UNIT sibling chain.
- *   • Dispatch top-level declarations to ir_lower_decl.c.
- *   • Dispatch function definitions to ir_lower_function().
- *   • Provide the shared ir_lower_ctx_t helpers used by all sections.
+ *   Walk the NODE_TRANSLATION_UNIT sibling chain.
+ *   Dispatch top-level declarations to ir_lower_decl.c.
+ *   Dispatch function definitions to ir_lower_function().
+ *   Provide the shared ir_lower_ctx_t helpers used by all sections.
  */
 
 #include <assert.h>
@@ -26,6 +26,7 @@
  * Diagnostics (§13)
  * ************************************************************/
 
+/* Emits a formatted error diagnostic and bumps the context's error counter. */
 void ir_diag(ir_lower_ctx_t *lctx, const char *code,
              size_t line, const char *fmt, ...)
 {
@@ -38,6 +39,7 @@ void ir_diag(ir_lower_ctx_t *lctx, const char *code,
     if (lctx) lctx->error_count++;
 }
 
+/* Emits a formatted warning diagnostic (does not count toward errors). */
 void ir_warn(ir_lower_ctx_t *lctx, const char *code,
              size_t line, const char *fmt, ...)
 {
@@ -54,6 +56,7 @@ void ir_warn(ir_lower_ctx_t *lctx, const char *code,
  * Semantic type → IR type  (§5)
  * ************************************************************/
 
+/* Maps a semantic type_t to its corresponding IR type. */
 ir_type_t ir_type_from_sem(const type_t *sem_type)
 {
     if (!sem_type || sem_type->kind == TYPE_INVALID)
@@ -89,9 +92,92 @@ ir_type_t ir_type_from_sem(const type_t *sem_type)
 }
 
 /* ***********************************************************
+ * Aggregate helpers — shared by ir_lower_decl.c and ir_lower_expr.c
+ * (declared in ir_lower.h).
+ * ************************************************************/
+
+/* Searches the AST for a struct/union declaration node matching `tag`. */
+const TreeNode_t *ir_find_aggregate_decl(const TreeNode_t *node,
+                                          NodeType_t want_kind,
+                                          const char *tag)
+{
+    if (!node || !tag) return NULL;
+    if (node->nodeType == want_kind && node->nodeData.sVal &&
+        strcmp(node->nodeData.sVal, tag) == 0)
+        return node;
+    for (const TreeNode_t *sib = node->p_sibling; sib; sib = sib->p_sibling) {
+        const TreeNode_t *r = ir_find_aggregate_decl(sib, want_kind, tag);
+        if (r) return r;
+    }
+    return ir_find_aggregate_decl(node->p_firstChild, want_kind, tag);
+}
+
+/* Recursively computes the word size of a semantic type, expanding aggregates. */
+size_t ir_compute_sem_type_words(ir_lower_ctx_t *lctx, const type_t *t)
+{
+    if (!t) return 1;
+    switch (t->kind) {
+    case TYPE_BUILTIN: {
+        ir_type_t it = ir_type_from_sem(t);
+        size_t s = ir_type_size_words(it);
+        return s ? s : 1;
+    }
+    case TYPE_POINTER: return 1;
+    case TYPE_ARRAY: {
+        size_t elem = ir_compute_sem_type_words(lctx, t->as.array.elem);
+        size_t cnt  = t->as.array.is_known_size ? t->as.array.size : 1;
+        return elem * cnt;
+    }
+    case TYPE_STRUCT_TAG: {
+        const TreeNode_t *decl =
+            (const TreeNode_t *)t->as.aggregate.decl_node;
+        if (!decl && t->as.aggregate.tag)
+            decl = ir_find_aggregate_decl(lctx->root,
+                                           NODE_STRUCT_DECLARATION,
+                                           t->as.aggregate.tag);
+        size_t total = 0;
+        for (const TreeNode_t *m = decl ? decl->p_firstChild : NULL;
+             m; m = m->p_sibling) {
+            if (m->nodeType != NODE_STRUCT_MEMBER &&
+                m->nodeType != NODE_ARRAY_DECLARATION) continue;
+            const sem_node_info_t *mi =
+                semantic_get_node_info(lctx->sem_ctx, m);
+            size_t s = mi && mi->type
+                ? ir_compute_sem_type_words(lctx, mi->type) : 1;
+            total += s ? s : 1;
+        }
+        return total ? total : 1;
+    }
+    case TYPE_UNION_TAG: {
+        const TreeNode_t *decl =
+            (const TreeNode_t *)t->as.aggregate.decl_node;
+        if (!decl && t->as.aggregate.tag)
+            decl = ir_find_aggregate_decl(lctx->root,
+                                           NODE_UNION_DECLARATION,
+                                           t->as.aggregate.tag);
+        size_t maxsz = 0;
+        for (const TreeNode_t *m = decl ? decl->p_firstChild : NULL;
+             m; m = m->p_sibling) {
+            if (m->nodeType != NODE_STRUCT_MEMBER &&
+                m->nodeType != NODE_ARRAY_DECLARATION) continue;
+            const sem_node_info_t *mi =
+                semantic_get_node_info(lctx->sem_ctx, m);
+            size_t s = mi && mi->type
+                ? ir_compute_sem_type_words(lctx, mi->type) : 1;
+            if (s > maxsz) maxsz = s;
+        }
+        return maxsz ? maxsz : 1;
+    }
+    default:
+        return 1;
+    }
+}
+
+/* ***********************************************************
  * Control-frame helpers (§8.3 rule 6)
  * ************************************************************/
 
+/* Pushes a break/continue target frame onto the control-flow stack. */
 void ir_ctrl_push(ir_lower_ctx_t *lctx,
                   unsigned break_block, unsigned continue_block, int has_continue)
 {
@@ -105,11 +191,13 @@ void ir_ctrl_push(ir_lower_ctx_t *lctx,
     f->has_continue   = has_continue;
 }
 
+/* Pops the innermost control-flow frame. */
 void ir_ctrl_pop(ir_lower_ctx_t *lctx)
 {
     if (lctx->ctrl_depth > 0) lctx->ctrl_depth--;
 }
 
+/* Returns the innermost control-flow frame, or NULL if none. */
 ir_ctrl_frame_t *ir_ctrl_top(ir_lower_ctx_t *lctx)
 {
     if (lctx->ctrl_depth == 0) return NULL;
@@ -120,6 +208,7 @@ ir_ctrl_frame_t *ir_ctrl_top(ir_lower_ctx_t *lctx)
  * Block helpers
  * ************************************************************/
 
+/* Allocates and appends a fresh block to the current function. */
 ir_block_t *ir_new_block(ir_lower_ctx_t *lctx)
 {
     ir_block_t *b = ir_block_new(lctx->func);
@@ -127,6 +216,7 @@ ir_block_t *ir_new_block(ir_lower_ctx_t *lctx)
     return b;
 }
 
+/* Returns 1 if the current block already ends with a terminator. */
 int ir_block_terminated(const ir_lower_ctx_t *lctx)
 {
     if (!lctx->cur_block || !lctx->cur_block->tail) return 0;
@@ -134,26 +224,27 @@ int ir_block_terminated(const ir_lower_ctx_t *lctx)
     return (op == IR_OP_GOTO || op == IR_OP_BRANCH || op == IR_OP_RET);
 }
 
+/* Closes the current block with an unconditional goto to `target_id`. */
 void ir_seal_goto(ir_lower_ctx_t *lctx, unsigned target_id)
 {
     if (ir_block_terminated(lctx)) return;
     ir_instr_t *i = ir_instr_new(IR_OP_GOTO);
-    i->as.branch.true_block  = target_id;
-    i->as.branch.false_block = target_id;
+    IR_BRANCH_SET_TARGETS(i, target_id, target_id);
     ir_instr_push(lctx->cur_block, i);
 }
 
+/* Closes the current block with a conditional branch on `pred`. */
 void ir_seal_branch(ir_lower_ctx_t *lctx, ir_value_t pred,
                     unsigned true_id, unsigned false_id)
 {
     if (ir_block_terminated(lctx)) return;
     ir_instr_t *i = ir_instr_new(IR_OP_BRANCH);
     i->src[0] = pred;
-    i->as.branch.true_block  = true_id;
-    i->as.branch.false_block = false_id;
+    IR_BRANCH_SET_TARGETS(i, true_id, false_id);
     ir_instr_push(lctx->cur_block, i);
 }
 
+/* Closes the current block with a switch terminator over the case table. */
 void ir_seal_switch(ir_lower_ctx_t *lctx,
                     ir_value_t value,
                     unsigned default_id,
@@ -353,30 +444,35 @@ void ir_lower_function(ir_lower_ctx_t *lctx, const TreeNode_t *func_node)
         }
 
         /* Allocate a stack slot for this parameter.
-         * Even though the value arrives in a vreg, we immediately spill it
-         * to a named slot so that the rest of the body can treat it like
-         * any other local variable (load/store via addr_of). */
+         * Even though the value arrives in a vreg (or on the caller's stack
+         * for params 4+), we immediately spill it to a named slot so that
+         * the rest of the body can treat it like any other local variable
+         * (load/store via addr_of). */
         unsigned slot = ir_new_slot(func, param_name, param_ir_type);
 
-        /* Emit:  %vA = addr_of %slotK
-         * This instruction computes the address of the stack slot we just
-         * allocated.  The vreg id A is >= n_params because step 1 already
-         * consumed the first n_params ids. */
-        unsigned addr_r = ir_new_vreg(func);
-        ir_instr_t *addr_i = ir_instr_new(IR_OP_ADDR_OF);
-        addr_i->dst    = ir_val_vreg(addr_r, ir_type_ptr()); /* dest: pointer vreg */
-        addr_i->src[0] = ir_val_slot(slot, param_ir_type);   /* source: the slot   */
-        ir_instr_push(lctx->cur_block, addr_i);
+        /* Only emit IR to materialise REGISTER-PASSED params.  Stack-passed
+         * params (index >= PHYS_ARG_REGS = 3) are loaded from the caller's
+         * frame directly into their slot by the codegen prologue — going
+         * through a vreg here would force every stack-param vreg to be
+         * live-in simultaneously, but the IR has no construct for "live-in
+         * from caller", so regalloc would coalesce them and the prologue
+         * loads would clobber each other. */
+        if (param_idx < 3 /* PHYS_ARG_REGS */) {
+            /* Emit:  %vA = addr_of %slotK */
+            unsigned addr_r = ir_new_vreg(func);
+            ir_instr_t *addr_i = ir_instr_new(IR_OP_ADDR_OF);
+            addr_i->dst    = ir_val_vreg(addr_r, ir_type_ptr());
+            addr_i->src[0] = ir_val_slot(slot, param_ir_type);
+            ir_instr_push(lctx->cur_block, addr_i);
 
-        /* Emit:  *%vA = %vI
-         * Store the incoming parameter value (which lives in the reserved
-         * vreg %vI from step 1) into the stack slot via its address.
-         * After this, the parameter is accessible through the slot like
-         * any other local variable. */
-        ir_instr_t *store_i = ir_instr_new(IR_OP_STORE);
-        store_i->src[0] = ir_val_vreg(addr_r, ir_type_ptr());              /* address to write to  */
-        store_i->src[1] = ir_val_vreg(param_vregs[param_idx++], param_ir_type); /* value to write       */
-        ir_instr_push(lctx->cur_block, store_i);
+            /* Emit:  *%vA = %vI  (the precolored argument register) */
+            ir_instr_t *store_i = ir_instr_new(IR_OP_STORE);
+            store_i->src[0] = ir_val_vreg(addr_r, ir_type_ptr());
+            store_i->src[1] = ir_val_vreg(param_vregs[param_idx],
+                                           param_ir_type);
+            ir_instr_push(lctx->cur_block, store_i);
+        }
+        param_idx++;
     }
 
     /* ------------------------------------------------------------------
@@ -416,6 +512,8 @@ void ir_lower_function(ir_lower_ctx_t *lctx, const TreeNode_t *func_node)
  * PUBLIC IR ENTRY POINT
  *************************************************************/
 
+/* Top-level entry: walks the translation unit and lowers each
+ * function and global into the returned ir_module_t. */
 ir_module_t *ir_lower_translation_unit(const TreeNode_t   *root,
                                         semantic_context_t *sem_ctx,
                                         const char         *module_name)
@@ -429,6 +527,7 @@ ir_module_t *ir_lower_translation_unit(const TreeNode_t   *root,
     memset(&lctx, 0, sizeof(lctx));
     lctx.module  = mod;
     lctx.sem_ctx = sem_ctx;
+    lctx.root    = root;
 
      /*
      * Walk the direct children of NODE_TRANSLATION_UNIT.
@@ -457,24 +556,50 @@ ir_module_t *ir_lower_translation_unit(const TreeNode_t   *root,
             if (has_body) {
                 ir_lower_function(&lctx, child);
             } else {
-                /* emit extern declaration */
-                 const char *fname = "unknown";
-                    for (const TreeNode_t *ch = child->p_firstChild; ch; ch = ch->p_sibling) {
-                        if (ch->nodeType == NODE_IDENTIFIER && ch->nodeData.sVal) {
-                            fname = ch->nodeData.sVal;
-                            break;
-                        }
-                    }
-                    ir_type_t ft = ir_type_ptr();
-                    ir_module_add_global(mod, fname, ft, /*is_extern=*/1);
-                    }
+                /* emit extern declaration — NODE_FUNCTION stores the name
+                 * directly on the node (same convention as NODE_VAR_DECLARATION),
+                 * not as a NODE_IDENTIFIER child. */
+                const char *fname = (child->nodeData.sVal && child->nodeData.sVal[0])
+                                    ? child->nodeData.sVal
+                                    : "unknown";
+                ir_type_t ft = ir_type_ptr();
+                ir_module_add_global(mod, fname, ft, /*is_extern=*/1);
             }
             break;
+        }
 
         case NODE_VAR_DECLARATION:
-        case NODE_ARRAY_DECLARATION:
-            ir_lower_global_decl(&lctx, child);
+        case NODE_ARRAY_DECLARATION: {
+            /* Detect a sibling `=` initialiser of the form 
+            *       VAR_DECL(x)
+            *       OPERATOR(=)
+            *           IDENTIFIER(x)
+            *           <expr>
+            * and feed the RHS to ir_lower_global-decl as the initialiser */
+            const TreeNode_t *init_expr = NULL;
+            const TreeNode_t *next = child->p_sibling;
+
+            /* Find this declaration's identifier name (if any). */
+            const char *decl_name = child->nodeData.sVal;
+
+            if (decl_name && next &&
+                next->nodeType == NODE_OPERATOR &&
+                (long)next->nodeData.dVal == OP_ASSIGN &&
+                next->p_firstChild && next->p_firstChild->nodeType == NODE_IDENTIFIER &&
+                next->p_firstChild->nodeData.sVal &&
+                strcmp(next->p_firstChild->nodeData.sVal, decl_name) == 0) {
+                    init_expr = next->p_firstChild->p_sibling; /* RHS */
+            }
+
+            ir_lower_global_decl(&lctx, child, init_expr);
+            
+            if (init_expr) {
+                /* Skip the OPERATOR(=) node since we already processed the initialiser. */
+                child = next; 
+            }
+
             break;
+        }
 
         case NODE_STRUCT_DECLARATION:
         case NODE_UNION_DECLARATION:
