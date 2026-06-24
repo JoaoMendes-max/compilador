@@ -1,4 +1,10 @@
-# Compilador
+# Compilador — V2
+
+> **V2.** Esta é a base de partida para a próxima fase do projeto: a partir
+> daqui vou tentar implementar, por mim, as melhorias listadas em
+> [`ROADMAP.md`](ROADMAP.md) — SSA (e tudo o que vem com ela), escalonamento de
+> instruções, peephole e garbage collection. O código abaixo é o ponto de
+> partida funcional; as melhorias serão feitas em cima dele.
 
 Compilador de um subconjunto de C para uma ISA RISC de 16 bits própria.
 Traduz `.c` → assembly de ponta a ponta: análise léxica, sintática, semântica,
