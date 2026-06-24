@@ -1,0 +1,16 @@
+# Build artifacts
+/compiler
+output.asm
+*.o
+
+# Flex / Bison generated sources
+Lexer/lex.yy.c
+Parser/parser.tab.c
+Parser/parser.tab.h
+
+# Assembler generated sources + binary
+assembler/Step1/lex.yy.c
+assembler/Step1/parser_tab.c
+assembler/Step1/parser_tab.h
+assembler/assembler
+assembler/build/
