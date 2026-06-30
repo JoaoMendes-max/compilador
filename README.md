@@ -1,6 +1,6 @@
 # Compilador
 
-Compilador de um subconjunto de C para uma ISA RISC de 16 bits própria.
+Compilador de um subconjunto de C para uma ISA RISC ( processador desenvolvido )de 16 bits própria.
 Traduz `.c` → assembly de ponta a ponta: análise léxica, sintática, semântica,
 geração de IR, alocação de registos e geração de código.
 
