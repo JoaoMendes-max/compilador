@@ -1,73 +1,70 @@
-# Compilador
+# Compiler
 
-Compilador de um subconjunto de C para uma ISA RISC ( processador desenvolvido )de 16 bits própria.
-Traduz `.c` → assembly de ponta a ponta: análise léxica, sintática, semântica,
-geração de IR, alocação de registos e geração de código.
+Compiler for a subset of C targeting a custom 16-bit RISC ISA (custom-designed processor). Translates `.c` → assembly end to end: lexical analysis, syntax analysis, semantic analysis, IR generation, register allocation, and code generation.
 
 ## Pipeline
 
 ```
 .c → Lexer (Flex) → Parser (Bison) → AST
-   → Análise Semântica (2 passes) → AST anotada
-   → IR Lowering (3 endereços, registos virtuais)
-   → Liveness → Interferência → Pre-color → Chaitin-Briggs → Spill (iterativo)
+   → Semantic Analysis (2 passes) → annotated AST
+   → IR Lowering (three-address, virtual registers)
+   → Liveness → Interference → Pre-color → Chaitin-Briggs → Spill (iterative)
    → Code Generation → output.asm
+
 ```
 
-`main.c` corre cada fase em sequência. O IR só corre se a semântica não tiver
-erros; o codegen só corre se a alocação de registos convergir. Para o assembly
-final correr, é ligado contra `runtime/runtime.asm` (helpers de mul/div/mod).
+`main.c` runs each phase in sequence. The IR only runs if semantic analysis has no errors; codegen only runs if register allocation converges. For the final assembly to run, it is linked against `runtime/runtime.asm` (mul/div/mod helpers).
 
-## Build e execução
+## Build and run
 
-Requer `gcc`, `flex` e `bison`.
+Requires `gcc`, `flex`, and `bison`.
 
-```sh
+```
 make
-./compiler programa.c      # gera output.asm
+./compiler program.c      # generates output.asm
 ```
 
-## Estrutura
+## Structure
 
 ```
-Lexer/        Scanner Flex (lexer.l)
-Parser/       Gramática Bison + AST (parser.y, ASTree, ASTPrint)
-Semantic/     Análise semântica em 2 passes, símbolos, tipos, arena
-IR/           IR e lowering (decl / expr / stmt)
-CodeGen/      Geração de código
-  RegAlloc/   Liveness, interferência, pre-color, Chaitin-Briggs, spill
+Lexer/        Flex scanner (lexer.l)
+Parser/       Bison grammar + AST (parser.y, ASTree, ASTPrint)
+Semantic/     2-pass semantic analysis, symbols, types, arena
+IR/           IR and lowering (decl / expr / stmt)
+CodeGen/      Code generation
+  RegAlloc/   Liveness, interference, pre-color, Chaitin-Briggs, spill
 Util/         Logger, NodeTypes
-runtime/      runtime.asm (mul / div / mod por software)
-assembler/    Assembler autónomo (asm → hex)
-scripts/      Helpers de build e teste
-test_files/   Programas de teste (IR, regalloc, semântica)
-docs/         Especificações + relatório
-main.c        Driver da pipeline
+runtime/      runtime.asm (software mul / div / mod)
+assembler/    Standalone assembler (asm → hex)
+scripts/      Build and test helpers
+test_files/   Test programs (IR, regalloc, semantics)
+docs/         Specifications + report
+main.c        Pipeline driver
+
 ```
 
-## Testes
+## Tests
 
-```sh
+```
 make
-scripts/test_compile_all.sh   # compila todos os testes e compara com snapshots
+scripts/test_compile_all.sh   # compiles every test and compares against snapshots
 ```
 
-Os programas estão em `test_files/` (`IR_checks/`, `RegisterAllocation/`,
-`semantic_checks/`).
+The programs are located in `test_files/` (`IR_checks/`, `RegisterAllocation/`, `semantic_checks/`).
 
-## Limitações conhecidas
+## Known limitations
 
-- Ponteiros para funções / chamadas indiretas — rejeitados.
-- Struct/union por valor (cópia, parâmetros, retorno) — só acesso a campos.
-- Floating point — bloqueado na semântica.
-- `long long` / aritmética de 64 bits — não suportado.
-- Inicializadores agregados (`{1, 2, 3}`) — arrays/structs ficam a zero.
-- Funções variádicas — não suportadas.
+* Function pointers / indirect calls — rejected.
+* Struct/union by value (copy, parameters, return) — field access only.
+* Floating point — blocked at the semantic level.
+* `long long` / 64-bit arithmetic — not supported.
+* Aggregate initializers (`{1, 2, 3}`) — arrays/structs are left zeroed.
+* Variadic functions — not supported.
 
-## Documentação
+## Documentation
 
-- [Relatório do compilador (PDF)](docs/Compiler_Report.pdf)
-- [docs/Compiler Overview.md](docs/Compiler%20Overview.md) — visão geral da pipeline.
-- [docs/IR Specification.md](docs/IR%20Specification.md) — referência do IR.
-- [docs/Code Generation Specification.md](docs/Code%20Generation%20Specification.md) — geração de código.
-- [abi_spec.md](abi_spec.md) — convenção de registos e chamadas.
+* [Compiler Report (PDF)](https://github.com/JoaoMendes-max/compilador/blob/main/docs/Compiler_Report.pdf)
+* [docs/Compiler Overview.md](https://github.com/JoaoMendes-max/compilador/blob/main/docs/Compiler%20Overview.md) — pipeline overview.
+* [docs/IR Specification.md](https://github.com/JoaoMendes-max/compilador/blob/main/docs/IR%20Specification.md) — IR reference.
+* [docs/Code Generation Specification.md](https://github.com/JoaoMendes-max/compilador/blob/main/docs/Code%20Generation%20Specification.md) — code generation.
+* [abi_spec.md](https://github.com/JoaoMendes-max/compilador/blob/main/abi_spec.md) — register and calling convention.
